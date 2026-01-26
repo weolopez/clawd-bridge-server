@@ -1,7 +1,15 @@
 import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 
 const PORT = 8082;
-const CLAWDBOT_URL = "http://localhost:3000/v1/messages"; // Placeholder for actual Clawdbot internal API
+const CLAWDBOT_URL = "http://127.0.0.1:18789/v1/sessions/agent:main:main/send";
+
+// Load token from environment variable
+const CLAWDBOT_TOKEN = Deno.env.get("CLAWDBOT_TOKEN");
+
+if (!CLAWDBOT_TOKEN) {
+  console.error("FATAL: CLAWDBOT_TOKEN environment variable is not set.");
+  Deno.exit(1);
+}
 
 async function handleRequest(request: Request): Promise<Response> {
   const url = new URL(request.url);
@@ -18,21 +26,39 @@ async function handleRequest(request: Request): Promise<Response> {
   if (url.pathname === "/message" && request.method === "POST") {
     try {
       const body = await request.json();
-      const { message, sessionId } = body;
+      const { message } = body;
 
-      console.log(`[Bridge Server] Message for session ${sessionId}: ${message}`);
+      console.log(`[Bridge Server] Forwarding message to Archie: ${message}`);
 
-      // Here we will eventually call the Clawdbot API
-      // For now, we simulate a response
+      const response = await fetch(CLAWDBOT_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${CLAWDBOT_TOKEN}`
+        },
+        body: JSON.stringify({ message })
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`[Bridge Server] API error: ${errorText}`);
+        return new Response(JSON.stringify({ error: "Failed to communicate with Archie" }), {
+          status: 500,
+          headers: { ...corsHeaders, "Content-Type": "application/json" }
+        });
+      }
+
+      const result = await response.json();
       return new Response(JSON.stringify({
-        reply: `Archie received your message: "${message}". The bridge is almost complete!`,
-        sessionId: sessionId
+        status: "success",
+        result
       }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" }
       });
     } catch (err) {
-      return new Response(JSON.stringify({ error: "Invalid request" }), {
-        status: 400,
+      console.error("[Bridge Server] Internal Error:", err);
+      return new Response(JSON.stringify({ error: "Internal Server Error" }), {
+        status: 500,
         headers: { ...corsHeaders, "Content-Type": "application/json" }
       });
     }
