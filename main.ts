@@ -1,5 +1,4 @@
 import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
-import { jwtVerify, createRemoteJWKSet } from "https://deno.land/x/jose@v4.14.4/index.ts";
 
 const PORT = 8083;
 const CLAWDBOT_URL = "http://127.0.0.1:18789/tools/invoke";
@@ -10,22 +9,20 @@ if (!CLAWDBOT_TOKEN) {
   Deno.exit(1);
 }
 
-// Google OAuth2 JWKS
-const googleJWKS = createRemoteJWKSet(new URL("https://www.googleapis.com/oauth2/v3/certs"));
-const GOOGLE_CLIENT_ID = Deno.env.get("GOOGLE_CLIENT_ID") || "671385367166-4118tll0ntluovkdm5agd85arvl1ml9h.apps.googleusercontent.com";
-
 /**
- * Verifies Google JWT and returns user info
+ * Validates Google Access Token by calling userinfo endpoint
  */
-async function verifyGoogleJWT(token: string) {
+async function verifyGoogleAccessToken(token: string) {
   try {
-    const { payload } = await jwtVerify(token, googleJWKS, {
-      issuer: "https://accounts.google.com",
-      audience: GOOGLE_CLIENT_ID,
+    const response = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+      headers: { 'Authorization': `Bearer ${token}` }
     });
-    return payload;
+    if (!response.ok) return null;
+    const user = await response.json();
+    if (user.email !== "weolopez@gmail.com") return null;
+    return user;
   } catch (error) {
-    console.error("[Bridge Auth] JWT verification failed:", error);
+    console.error("[Bridge Auth] Token verification failed:", error);
     return null;
   }
 }
@@ -47,18 +44,13 @@ async function handleRequest(request: Request): Promise<Response> {
 
   // --- Security Helper ---
   const checkAuth = async (req: Request) => {
-    // Check Authorization header or query param (for SSE)
     const authHeader = req.headers.get("Authorization");
     let token = authHeader?.startsWith("Bearer ") ? authHeader.split(" ")[1] : null;
-    
     if (!token) {
       token = new URL(req.url).searchParams.get("token");
     }
-
     if (!token) return null;
-    const user = await verifyGoogleJWT(token);
-    if (!user || user.email !== "weolopez@gmail.com") return null;
-    return user;
+    return await verifyGoogleAccessToken(token);
   };
 
   // --- 1. Client Events (SSE) ---
@@ -80,7 +72,7 @@ async function handleRequest(request: Request): Promise<Response> {
           }
         };
         clients.set(clientId, send);
-        console.log(`[Bridge] ${user.email} connected: ${clientId} (Total: ${clients.size})`);
+        console.log(`[Bridge] ${user.email} connected (Total: ${clients.size})`);
         
         const keepAlive = setInterval(() => {
           try {
@@ -92,7 +84,7 @@ async function handleRequest(request: Request): Promise<Response> {
       },
       cancel() {
         clients.delete(clientId);
-        console.log(`[Bridge] Client disconnected: ${clientId}`);
+        console.log(`[Bridge] Client disconnected`);
       },
     });
 
@@ -148,18 +140,13 @@ async function handleRequest(request: Request): Promise<Response> {
 
   // --- 3. Outbound Hook (Internal Only) ---
   if (url.pathname === "/push" && request.method === "POST") {
-    // This is called internally by the agent workspace
     try {
       const body = await request.json();
       const { message } = body;
-      
-      console.log(`[Bridge Server] Pushing message to ${clients.size} clients`);
-      
       const payload = JSON.stringify({ message, timestamp: new Date().toISOString() });
       for (const send of clients.values()) {
         send(payload);
       }
-
       return new Response(JSON.stringify({ ok: true }), { headers: corsHeaders });
     } catch (err) {
       return new Response(JSON.stringify({ error: "Push failed" }), { status: 400, headers: corsHeaders });
@@ -169,5 +156,5 @@ async function handleRequest(request: Request): Promise<Response> {
   return new Response("Not Found", { status: 404, headers: corsHeaders });
 }
 
-console.log(`Archie Secure Bridge Server running on http://localhost:${PORT}`);
+console.log(`Archie AccessToken Bridge Server running on http://localhost:${PORT}`);
 serve(handleRequest, { port: PORT });
