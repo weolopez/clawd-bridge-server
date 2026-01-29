@@ -1,13 +1,19 @@
 import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
+import { jwtVerify, createRemoteJWKSet } from "https://deno.land/x/jose@v4.14.4/index.ts";
 
 const PORT = 8083;
 const CLAWDBOT_URL = "http://127.0.0.1:18789/tools/invoke";
+const CLAWDBOT_CHAT_URL = "http://127.0.0.1:18789/v1/chat/completions";
 const CLAWDBOT_TOKEN = Deno.env.get("CLAWDBOT_TOKEN");
 
 if (!CLAWDBOT_TOKEN) {
   console.error("FATAL: CLAWDBOT_TOKEN environment variable is not set.");
   Deno.exit(1);
 }
+
+// Google OAuth2 JWKS
+const googleJWKS = createRemoteJWKSet(new URL("https://www.googleapis.com/oauth2/v3/certs"));
+const GOOGLE_CLIENT_ID = Deno.env.get("GOOGLE_CLIENT_ID") || "671385367166-4118tll0ntluovkdm5agd85arvl1ml9h.apps.googleusercontent.com";
 
 /**
  * Validates Google Access Token by calling userinfo endpoint
@@ -19,7 +25,7 @@ async function verifyGoogleAccessToken(token: string) {
     });
     if (!response.ok) return null;
     const user = await response.json();
-    if (user.email !== "weolopez@gmail.com") return null;
+    if (user.email.toLowerCase() !== "weolopez@gmail.com") return null;
     return user;
   } catch (error) {
     console.error("[Bridge Auth] Token verification failed:", error);
@@ -107,10 +113,43 @@ async function handleRequest(request: Request): Promise<Response> {
 
     try {
       const body = await request.json();
-      const { message } = body;
+      const { message, useCompletions, systemPrompt } = body;
 
+      // Handle direct Chat Completion request (The "Archie Proxy")
+      if (useCompletions) {
+        console.log(`[Bridge Server] Proxying Chat Completion for ${user.email}`);
+        const response = await fetch(CLAWDBOT_CHAT_URL, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${CLAWDBOT_TOKEN}`
+          },
+          body: JSON.stringify({
+            messages: [
+              { role: "system", content: systemPrompt },
+              { role: "user", content: message }
+            ],
+            model: "default"
+          })
+        });
+
+        if (!response.ok) {
+          const errorText = await response.text();
+          console.error(`[Bridge Server] Clawdbot Chat API error: ${errorText}`);
+          return new Response(JSON.stringify({ error: "Gemini Proxy error" }), { status: 500, headers: corsHeaders });
+        }
+
+        const completionResult = await response.json();
+        return new Response(JSON.stringify({
+          status: "success",
+          reply: completionResult.choices[0].message.content
+        }), {
+          headers: { ...corsHeaders, "Content-Type": "application/json" }
+        });
+      }
+
+      // Default: Forward to the agent turn
       console.log(`[Bridge Server] Forwarding message from ${user.email}: ${message}`);
-
       const response = await fetch(CLAWDBOT_URL, {
         method: "POST",
         headers: {
