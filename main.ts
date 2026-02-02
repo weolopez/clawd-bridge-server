@@ -5,6 +5,8 @@ const PORT = 8083;
 const CLAWDBOT_URL = "http://127.0.0.1:18789/tools/invoke";
 const CLAWDBOT_CHAT_URL = "http://127.0.0.1:18789/v1/chat/completions";
 const CLAWDBOT_TOKEN = Deno.env.get("CLAWDBOT_TOKEN");
+const VARGO_TOKEN = Deno.env.get("VARGO_TELEGRAM_TOKEN");
+const GROUP_CHAT_ID = "-1003897324317";
 
 if (!CLAWDBOT_TOKEN) {
   console.error("FATAL: CLAWDBOT_TOKEN environment variable is not set.");
@@ -189,6 +191,46 @@ async function handleRequest(request: Request): Promise<Response> {
       return new Response(JSON.stringify({ ok: true }), { headers: corsHeaders });
     } catch (err) {
       return new Response(JSON.stringify({ error: "Push failed" }), { status: 400, headers: corsHeaders });
+    }
+  }
+
+  // --- 4. Vargo Telegram Relay ---
+  if (url.pathname === "/relay/vargo" && request.method === "POST") {
+    if (!VARGO_TOKEN) {
+      return new Response(JSON.stringify({ error: "Vargo identity not configured on server" }), { status: 500, headers: corsHeaders });
+    }
+
+    try {
+      const body = await request.json();
+      const { message } = body;
+
+      if (!message) {
+        return new Response(JSON.stringify({ error: "No message provided" }), { status: 400, headers: corsHeaders });
+      }
+
+      console.log(`[Relay] Vargo is speaking: ${message}`);
+
+      const telegramUrl = `https://api.telegram.org/bot${VARGO_TOKEN}/sendMessage`;
+      const response = await fetch(telegramUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          chat_id: GROUP_CHAT_ID,
+          text: message
+        })
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`[Relay] Telegram API error: ${errorText}`);
+        return new Response(JSON.stringify({ error: "Failed to send to Telegram" }), { status: 500, headers: corsHeaders });
+      }
+
+      return new Response(JSON.stringify({ status: "success" }), {
+        headers: { ...corsHeaders, "Content-Type": "application/json" }
+      });
+    } catch (err) {
+      return new Response(JSON.stringify({ error: "Invalid relay request" }), { status: 400, headers: corsHeaders });
     }
   }
 
