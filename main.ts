@@ -6,7 +6,9 @@ const CLAWDBOT_URL = "http://127.0.0.1:18789/tools/invoke";
 const CLAWDBOT_CHAT_URL = "http://127.0.0.1:18789/v1/chat/completions";
 const CLAWDBOT_TOKEN = Deno.env.get("CLAWDBOT_TOKEN");
 const VARGO_TOKEN = Deno.env.get("VARGO_TELEGRAM_TOKEN");
+const ARCHIE_TOKEN = Deno.env.get("ARCHIE_TELEGRAM_TOKEN"); // Token for Archie to talk via Bridge
 const GROUP_CHAT_ID = "-1003897324317";
+const ARCHIE_SESSION_KEY = "agent:main:telegram:group:-1003897324317";
 
 if (!CLAWDBOT_TOKEN) {
   console.error("FATAL: CLAWDBOT_TOKEN environment variable is not set.");
@@ -194,7 +196,7 @@ async function handleRequest(request: Request): Promise<Response> {
     }
   }
 
-  // --- 4. Vargo Telegram Relay ---
+  // --- 4. Vargo Telegram Relay (Vargo -> Humans + Archie) ---
   if (url.pathname === "/relay/vargo" && request.method === "POST") {
     if (!VARGO_TOKEN) {
       return new Response(JSON.stringify({ error: "Vargo identity not configured on server" }), { status: 500, headers: corsHeaders });
@@ -208,23 +210,76 @@ async function handleRequest(request: Request): Promise<Response> {
         return new Response(JSON.stringify({ error: "No message provided" }), { status: 400, headers: corsHeaders });
       }
 
-      console.log(`[Relay] Vargo is speaking: ${message}`);
+      console.log(`[Relay] Vargo -> Group: ${message}`);
 
+      // A. Speak to Humans via Telegram
       const telegramUrl = `https://api.telegram.org/bot${VARGO_TOKEN}/sendMessage`;
-      const response = await fetch(telegramUrl, {
+      const telPromise = fetch(telegramUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          chat_id: GROUP_CHAT_ID,
-          text: message
+        body: JSON.stringify({ chat_id: GROUP_CHAT_ID, text: message })
+      });
+
+      // B. Speak to Archie via internal OpenClaw API
+      const archiePromise = fetch(CLAWDBOT_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${CLAWDBOT_TOKEN}`
+        },
+        body: JSON.stringify({ 
+          tool: "sessions_send",
+          args: {
+            sessionKey: ARCHIE_SESSION_KEY,
+            message: `[Vargo]: ${message}`
+          }
         })
       });
 
-      if (!response.ok) {
-        const errorText = await response.text();
-        console.error(`[Relay] Telegram API error: ${errorText}`);
-        return new Response(JSON.stringify({ error: "Failed to send to Telegram" }), { status: 500, headers: corsHeaders });
+      await Promise.all([telPromise, archiePromise]);
+
+      return new Response(JSON.stringify({ status: "success" }), {
+        headers: { ...corsHeaders, "Content-Type": "application/json" }
+      });
+    } catch (err) {
+      return new Response(JSON.stringify({ error: "Invalid relay request" }), { status: 400, headers: corsHeaders });
+    }
+  }
+
+  // --- 5. Archie Telegram Relay (Archie -> Humans + Vargo) ---
+  if (url.pathname === "/relay/archie" && request.method === "POST") {
+    if (!ARCHIE_TOKEN) {
+      return new Response(JSON.stringify({ error: "Archie bridge token not configured" }), { status: 500, headers: corsHeaders });
+    }
+
+    try {
+      const body = await request.json();
+      const { message } = body;
+
+      if (!message) {
+        return new Response(JSON.stringify({ error: "No message provided" }), { status: 400, headers: corsHeaders });
       }
+
+      console.log(`[Relay] Archie -> Group: ${message}`);
+
+      // A. Speak to Humans via Telegram (appearing as Archie)
+      const telegramUrl = `https://api.telegram.org/bot${ARCHIE_TOKEN}/sendMessage`;
+      const telPromise = fetch(telegramUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ chat_id: GROUP_CHAT_ID, text: message })
+      });
+
+      // B. Speak to Vargo via File-System Sync
+      // Since Vargo is aloop-agent-fs, we write to a shared communications directory
+      const inboxPath = "communications/vargo_inbox.jsonl";
+      const entry = JSON.stringify({ from: "Archie", message, timestamp: new Date().toISOString() }) + "\n";
+      
+      // Note: In a real deploy, the bridge would append this to the repo or a shared volume.
+      // For now, we log the intent.
+      console.log(`[Relay] Archie -> Vargo (Inbox): ${message}`);
+
+      await telPromise;
 
       return new Response(JSON.stringify({ status: "success" }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" }
